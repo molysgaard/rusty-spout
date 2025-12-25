@@ -27,6 +27,7 @@ mod godot;
 
 use std::{
     ffi::{CStr, CString},
+    os::raw::{c_ulong, c_void},
     pin::Pin,
 };
 
@@ -118,8 +119,8 @@ type Result<T> = std::result::Result<T, Error>;
 
 /// A Windows DWORD which _should_ be a ulong.
 pub type DWORD = c_ulong;
-/// A void pointer.
-pub type HANDLE = ffi::HANDLE;
+/// A void pointer (Windows HANDLE).
+pub type HANDLE = *mut c_void;
 /// An OpenGL uint which _should_ be a uint.
 pub type GLuint = c_uint;
 // TODO lookup the actual enums and redefine them here?
@@ -133,8 +134,21 @@ include_cpp! {
 
     safety!(unsafe)
 
-    generate!("GetSpout")
     generate!("SPOUTLIBRARY")
+}
+
+// Manual FFI binding for GetSpout since autocxx cannot handle extern "C" functions with WINAPI
+#[link(name = "SpoutLibrary")]
+extern "system" {
+    /// Factory function that creates an instance of the SPOUT object.
+    /// This is manually bound because autocxx cannot handle extern "C" functions with WINAPI calling convention.
+    #[link_name = "GetSpout"]
+    fn GetSpout_raw() -> *mut ffi::SPOUTLIBRARY;
+}
+
+// Helper function to get Spout handle (wraps the manual FFI binding)
+fn get_spout_handle() -> *mut ffi::SPOUTLIBRARY {
+    unsafe { GetSpout_raw() }
 }
 
 /// Helper for getting a usable library handle.
@@ -167,15 +181,8 @@ macro_rules! str_to_cstring {
 /// Conversion helper for creating [String]s from [CString]s.
 macro_rules! cstring_to_string {
     ($fn_name:expr, $c_string:expr) => {{
-        match $c_string.to_str() {
-            Ok(v) => v.to_string(),
-            Err(e) => {
-                return Err(Error::FfiTypeFrom {
-                    ffi_type: FfiType::CString,
-                    context: format!("{}: {e}", $fn_name),
-                })
-            }
-        }
+        // Use lossy conversion to handle invalid UTF-8 in sender names
+        $c_string.to_string_lossy().to_string()
     }};
 }
 
@@ -231,7 +238,7 @@ impl RustySpout {
 
     /// Get a handle to spout.
     pub fn get_spout(&mut self) -> Result<()> {
-        let handle = ffi::GetSpout();
+        let handle = get_spout_handle();
         if handle.is_null() {
             return Err(Error::NoHandle);
         }
@@ -275,7 +282,7 @@ impl RustySpout {
     pub fn set_sender_format(&mut self, format: DWORD) -> Result<()> {
         let lib = unsafe { library!(self.library) };
 
-        lib.SetSenderFormat(format);
+        lib.SetSenderFormat(format.into());
 
         Ok(())
     }
@@ -290,7 +297,7 @@ impl RustySpout {
     pub fn release_sender(&mut self, msec: DWORD) -> Result<()> {
         let lib = unsafe { library!(self.library) };
 
-        lib.ReleaseSender(msec);
+        lib.ReleaseSender(msec.into());
 
         Ok(())
     }
@@ -442,7 +449,7 @@ impl RustySpout {
     pub fn get_handle(&mut self) -> Result<HANDLE> {
         let lib = unsafe { library!(self.library) };
 
-        Ok(lib.GetHandle())
+        Ok(lib.GetHandle() as *mut c_void)
     }
 
     /// Get the sender sharing method.
@@ -642,7 +649,7 @@ impl RustySpout {
     /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
     pub fn get_sender_format(&mut self) -> Result<DWORD> {
         if let Some(lib) = self.library {
-            unsafe { return Ok(as_pin(lib).GetSenderFormat()) }
+            unsafe { return Ok(as_pin(lib).GetSenderFormat().0) }
         }
 
         Err(Error::NoHandle)
@@ -679,7 +686,7 @@ impl RustySpout {
     pub fn get_sender_handle(&mut self) -> Result<HANDLE> {
         let lib = unsafe { library!(self.library) };
 
-        Ok(lib.GetSenderHandle())
+        Ok(lib.GetSenderHandle() as *mut c_void)
     }
 
     /// Get the received sender sharing mode.
@@ -822,7 +829,7 @@ impl RustySpout {
             }
         };
 
-        let success = unsafe { lib.WaitFrameSync(name.as_ptr(), timeout) };
+        let success = unsafe { lib.WaitFrameSync(name.as_ptr(), timeout.into()) };
 
         Ok(success)
     }
@@ -1055,7 +1062,7 @@ impl RustySpout {
 
         let message = str_to_cstring!("spout_message_box", message);
 
-        let result = unsafe { lib.SpoutMessageBox(message.as_ptr(), milliseconds) };
+        let result = unsafe { lib.SpoutMessageBox(message.as_ptr(), milliseconds.into()) };
 
         Ok(result.0)
     }
@@ -1227,21 +1234,27 @@ impl RustySpout {
     ) -> Result<(bool, String)> {
         let lib = unsafe { library!(self.library) };
 
-        let mut buffer = vec![1; max_size - 1];
-        buffer.push(0);
-        let sender_name = buf_to_cstr!(buffer);
-
+        // Initialize buffer with zeros to ensure clean state
+        let mut buffer = vec![0u8; max_size];
+        
         let max_size = usize_to_c_int!(max_size);
 
         let success = unsafe {
             lib.GetSender(
                 index.into(),
-                sender_name.as_ptr().cast_mut(),
+                buffer.as_mut_ptr().cast(),
                 max_size.into(),
             )
         };
 
-        let sender_name = cstring_to_string!("get_sender", sender_name);
+        // Find the null terminator to get the actual string length
+        // GetSender should null-terminate the string, so find where it ends
+        let len = buffer.iter()
+            .position(|&b| b == 0)
+            .unwrap_or(buffer.len());
+        
+        // Extract only the valid string portion (up to but not including the null terminator)
+        let sender_name = String::from_utf8_lossy(&buffer[..len]).to_string();
 
         Ok((success, sender_name))
     }
@@ -1259,30 +1272,35 @@ impl RustySpout {
     pub fn get_sender_info<T: AsRef<str>>(
         &mut self,
         sender_name: T,
-        width: u32,
-        height: u32,
-        share_handle: HANDLE,
-        format: DWORD,
-    ) -> Result<bool> {
+    ) -> Result<(bool, u32, u32, HANDLE, DWORD)> {
         let lib = unsafe { library!(self.library) };
 
         let sender_name = str_to_cstring!("get_sender_info", sender_name);
 
-        // TODO all these params need to be pinned
+        // Create mutable variables for output parameters (using autocxx types)
+        let mut width: autocxx::c_uint = 0.into();
+        let mut height: autocxx::c_uint = 0.into();
+        let mut share_handle: *mut autocxx::c_void = std::ptr::null_mut();
+        let mut format: autocxx::c_ulong = 0.into();
 
-        // let success = unsafe {
-        //     lib.GetSenderInfo(
-        //         sender_name.as_ptr(),
-        //         width.into(),
-        //         height.into(),
-        //         share_handle,
-        //         format,
-        //     )
-        // };
+        // GetSenderInfo expects Pin<&mut T> for mutable references
+        let success = unsafe {
+            lib.GetSenderInfo(
+                sender_name.as_ptr(),
+                Pin::new_unchecked(&mut width),
+                Pin::new_unchecked(&mut height),
+                Pin::new_unchecked(&mut share_handle),
+                Pin::new_unchecked(&mut format),
+            )
+        };
 
-        // Ok(success)
-
-        todo!()
+        Ok((
+            success,
+            width.0,
+            height.0,
+            share_handle as *mut std::os::raw::c_void,
+            format.0,
+        ))
     }
 
     pub fn get_active_sender<T: AsRef<str>>(&mut self) -> Result<(bool, String)> {
@@ -1362,8 +1380,14 @@ impl RustySpout {
 
         let sender_name = str_to_cstring!("create_sender", sender_name);
 
-        let success =
-            unsafe { lib.CreateSender(sender_name.as_ptr(), width.into(), height.into(), format) };
+        let success = unsafe {
+            lib.CreateSender(
+                sender_name.as_ptr(),
+                width.into(),
+                height.into(),
+                format.into(),
+            )
+        };
 
         Ok(success)
     }
@@ -1720,7 +1744,7 @@ impl RustySpout {
     pub fn open_directx11(&mut self, device: *mut c_void) -> Result<bool> {
         let lib = unsafe { library!(self.library) };
 
-        let success = unsafe { lib.OpenDirectX11(device) };
+        let success = unsafe { lib.OpenDirectX11(device as *mut autocxx::c_void) };
 
         Ok(success)
     }
@@ -1741,7 +1765,7 @@ impl RustySpout {
             return Err(Error::NullPtr);
         }
 
-        Ok(ptr)
+        Ok(ptr as *mut c_void)
     }
 
     pub fn get_dx11_context(&mut self) -> Result<*mut c_void> {
@@ -1752,7 +1776,7 @@ impl RustySpout {
             return Err(Error::NullPtr);
         }
 
-        Ok(ptr)
+        Ok(ptr as *mut c_void)
     }
 
     pub fn release(&mut self) -> Result<()> {

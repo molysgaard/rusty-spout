@@ -25,7 +25,7 @@ fn main() {
         &[spout_build_dir.join("include/SpoutLibrary")],
     )
     .build()
-    .unwrap();
+    .expect("Failed to generate autocxx bindings. This might be due to autocxx limitations with certain C++ constructs.");
     cxx_builder
         .flag_if_supported("-std=c++14")
         .compile("spoutlib");
