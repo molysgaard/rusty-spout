@@ -22,6 +22,7 @@ autocxx = "0.26"
 cxx = "1.0"
 godot = { git = "https://github.com/godot-rust/gdext.git", rev = "b4e6fd6c9c23e0fd3a124c2893a9592c861ab780", optional = true }
 thiserror = "1.0"
+tracing = "0.1"
 
 [build-dependencies]
 autocxx-build = "0.26"

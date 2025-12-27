@@ -32,6 +32,7 @@ use std::{
 };
 
 use autocxx::prelude::*;
+use tracing::{debug, error, info, trace, warn};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -238,12 +239,15 @@ impl RustySpout {
 
     /// Get a handle to spout.
     pub fn get_spout(&mut self) -> Result<()> {
+        trace!("get_spout: Attempting to get spout handle");
         let handle = get_spout_handle();
         if handle.is_null() {
+            error!("get_spout: Failed to get spout handle (null pointer)");
             return Err(Error::NoHandle);
         }
 
         self.library = Some(handle);
+        info!("get_spout: Successfully obtained spout handle");
 
         Ok(())
     }
@@ -482,11 +486,17 @@ impl RustySpout {
     ///
     /// The `sender_name` is copied into a new [CString] and is supposed to be valid when passed to Spout.
     pub fn set_receiver_name<T: AsRef<str>>(&mut self, sender_name: T) -> Result<()> {
+        let sender_name_str = sender_name.as_ref();
+        info!("set_receiver_name: Setting receiver name to '{}'", sender_name_str);
         let lib = unsafe { library!(self.library) };
 
-        let name = match CString::new(sender_name.as_ref()) {
-            Ok(v) => v,
+        let name = match CString::new(sender_name_str) {
+            Ok(v) => {
+                debug!("set_receiver_name: Successfully created CString for '{}'", sender_name_str);
+                v
+            }
             Err(e) => {
+                error!("set_receiver_name: Failed to create CString for '{}': {}", sender_name_str, e);
                 return Err(Error::FfiTypeInto {
                     ffi_type: FfiType::CString,
                     context: format!("set_receiver_name: {e}"),
@@ -496,6 +506,7 @@ impl RustySpout {
         unsafe {
             lib.SetReceiverName(name.as_ptr());
         }
+        info!("set_receiver_name: Successfully set receiver name to '{}'", sender_name_str);
 
         Ok(())
     }
@@ -505,9 +516,11 @@ impl RustySpout {
     /// # Safety
     /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
     pub fn release_receiver(&mut self) -> Result<()> {
+        debug!("release_receiver: Releasing receiver");
         let lib = unsafe { library!(self.library) };
 
         lib.ReleaseReceiver();
+        info!("release_receiver: Receiver released successfully");
 
         Ok(())
     }
@@ -528,9 +541,18 @@ impl RustySpout {
         invert: bool,
         host_fbo: GLuint,
     ) -> Result<bool> {
+        trace!("receive_texture: Called with texture_id={:?}, texture_target={:?}, invert={}, host_fbo={:?}", 
+            texture_id, texture_target, invert, host_fbo);
         let lib = unsafe { library!(self.library) };
 
-        Ok(lib.ReceiveTexture(texture_id, texture_target, invert, host_fbo))
+        let success = lib.ReceiveTexture(texture_id, texture_target, invert, host_fbo);
+        if success {
+            debug!("receive_texture: ReceiveTexture returned true");
+        } else {
+            warn!("receive_texture: ReceiveTexture returned false");
+        }
+
+        Ok(success)
     }
 
     /// Receive image pixels.
@@ -549,9 +571,37 @@ impl RustySpout {
         invert: bool,
         host_fbo: GLuint,
     ) -> Result<bool> {
+        trace!("receive_image: Called with gl_format={:?}, invert={}, host_fbo={:?}", gl_format, invert, host_fbo);
+        trace!("receive_image: pixels pointer: {:?}", pixels as *const c_void);
+        
         let lib = unsafe { library!(self.library) };
 
+        // Check connection status before receiving
+        match self.is_connected() {
+            Ok(connected) => {
+                debug!("receive_image: Connection status before receive: {}", connected);
+            }
+            Err(e) => {
+                warn!("receive_image: Could not check connection status before receive: {}", e);
+            }
+        }
+
         let success = unsafe { lib.ReceiveImage(pixels.cast_mut(), gl_format, invert, host_fbo) };
+        
+        if success {
+            debug!("receive_image: ReceiveImage returned true");
+        } else {
+            warn!("receive_image: ReceiveImage returned false");
+            // Check connection status after failed receive
+            match self.is_connected() {
+                Ok(connected) => {
+                    debug!("receive_image: Connection status after failed receive: {}", connected);
+                }
+                Err(e) => {
+                    warn!("receive_image: Could not check connection status after failed receive: {}", e);
+                }
+            }
+        }
 
         Ok(success)
     }
@@ -563,9 +613,17 @@ impl RustySpout {
     /// # Safety
     /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
     pub fn is_updated(&mut self) -> Result<bool> {
+        trace!("is_updated: Checking if sender has been updated");
         let lib = unsafe { library!(self.library) };
 
-        Ok(lib.IsUpdated())
+        let updated = lib.IsUpdated();
+        if updated {
+            debug!("is_updated: Sender has been updated");
+        } else {
+            trace!("is_updated: Sender has not been updated");
+        }
+
+        Ok(updated)
     }
 
     /// Query sender connection.
@@ -575,9 +633,17 @@ impl RustySpout {
     /// # Safety
     /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
     pub fn is_connected(&mut self) -> Result<bool> {
+        trace!("is_connected: Checking connection status");
         let lib = unsafe { library!(self.library) };
 
-        Ok(lib.IsConnected())
+        let connected = lib.IsConnected();
+        if connected {
+            debug!("is_connected: Connected to sender");
+        } else {
+            warn!("is_connected: Not connected to sender");
+        }
+
+        Ok(connected)
     }
 
     /// Query received frame status.
@@ -588,9 +654,17 @@ impl RustySpout {
     /// # Safety
     /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
     pub fn is_frame_new(&mut self) -> Result<bool> {
+        trace!("is_frame_new: Checking if frame is new");
         let lib = unsafe { library!(self.library) };
 
-        Ok(lib.IsFrameNew())
+        let is_new = lib.IsFrameNew();
+        if is_new {
+            debug!("is_frame_new: New frame available");
+        } else {
+            trace!("is_frame_new: No new frame");
+        }
+
+        Ok(is_new)
     }
 
     /// Get the sender name.
@@ -602,20 +676,29 @@ impl RustySpout {
     /// # Panic
     /// Panics if the name is not nul terminated.
     pub fn get_sender_name(&mut self) -> Result<String> {
+        trace!("get_sender_name: Querying sender name");
         let lib = unsafe { library!(self.library) };
 
         let name = lib.GetSenderName();
         if name.is_null() {
+            error!("get_sender_name: Received null pointer");
             return Err(Error::NullPtr);
         }
 
         let name = unsafe { CStr::from_ptr(name) };
         match name.to_str() {
-            Ok(v) => Ok(v.to_string()),
-            Err(e) => Err(Error::FfiTypeFrom {
-                ffi_type: FfiType::CStr,
-                context: format!("get_sender_name: {e}"),
-            }),
+            Ok(v) => {
+                let sender_name = v.to_string();
+                debug!("get_sender_name: Sender name = '{}'", sender_name);
+                Ok(sender_name)
+            }
+            Err(e) => {
+                error!("get_sender_name: Failed to convert CStr to string: {}", e);
+                Err(Error::FfiTypeFrom {
+                    ffi_type: FfiType::CStr,
+                    context: format!("get_sender_name: {e}"),
+                })
+            }
         }
     }
 
@@ -624,10 +707,14 @@ impl RustySpout {
     /// # Safety
     /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
     pub fn get_sender_width(&mut self) -> Result<u32> {
+        trace!("get_sender_width: Querying sender width");
         if let Some(lib) = self.library {
-            unsafe { return Ok(as_pin(lib).GetSenderWidth().0) }
+            let width = unsafe { as_pin(lib).GetSenderWidth().0 };
+            debug!("get_sender_width: Sender width = {}", width);
+            return Ok(width);
         }
 
+        error!("get_sender_width: No handle available");
         Err(Error::NoHandle)
     }
 
@@ -636,10 +723,14 @@ impl RustySpout {
     /// # Safety
     /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
     pub fn get_sender_height(&mut self) -> Result<u32> {
+        trace!("get_sender_height: Querying sender height");
         if let Some(lib) = self.library {
-            unsafe { return Ok(as_pin(lib).GetSenderHeight().0) }
+            let height = unsafe { as_pin(lib).GetSenderHeight().0 };
+            debug!("get_sender_height: Sender height = {}", height);
+            return Ok(height);
         }
 
+        error!("get_sender_height: No handle available");
         Err(Error::NoHandle)
     }
 
@@ -660,10 +751,14 @@ impl RustySpout {
     /// # Safety
     /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
     pub fn get_sender_fps(&mut self) -> Result<f64> {
+        trace!("get_sender_fps: Querying sender FPS");
         if let Some(lib) = self.library {
-            unsafe { return Ok(as_pin(lib).GetSenderFps()) }
+            let fps = unsafe { as_pin(lib).GetSenderFps() };
+            debug!("get_sender_fps: Sender FPS = {:.2}", fps);
+            return Ok(fps);
         }
 
+        error!("get_sender_fps: No handle available");
         Err(Error::NoHandle)
     }
 
@@ -1222,9 +1317,13 @@ impl RustySpout {
     }
 
     pub fn get_sender_count(&mut self) -> Result<i32> {
+        trace!("get_sender_count: Querying sender count");
         let lib = unsafe { library!(self.library) };
 
-        Ok(lib.GetSenderCount().0)
+        let count = lib.GetSenderCount().0;
+        info!("get_sender_count: Found {} senders", count);
+
+        Ok(count)
     }
 
     pub fn get_sender<T: AsRef<str>>(
@@ -1232,6 +1331,7 @@ impl RustySpout {
         index: i32,
         max_size: usize,
     ) -> Result<(bool, String)> {
+        debug!("get_sender: Getting sender at index {} with max_size {}", index, max_size);
         let lib = unsafe { library!(self.library) };
 
         // Initialize buffer with zeros to ensure clean state
@@ -1256,15 +1356,29 @@ impl RustySpout {
         // Extract only the valid string portion (up to but not including the null terminator)
         let sender_name = String::from_utf8_lossy(&buffer[..len]).to_string();
 
+        if success {
+            info!("get_sender: Successfully retrieved sender at index {}: '{}'", index, sender_name);
+        } else {
+            warn!("get_sender: Failed to retrieve sender at index {} (returned name: '{}')", index, sender_name);
+        }
+
         Ok((success, sender_name))
     }
 
     pub fn find_sender_name<T: AsRef<str>>(&mut self, sender_name: T) -> Result<bool> {
+        let sender_name_str = sender_name.as_ref();
+        debug!("find_sender_name: Searching for sender '{}'", sender_name_str);
         let lib = unsafe { library!(self.library) };
 
         let sender_name = str_to_cstring!("find_sender_name", sender_name);
 
         let found = unsafe { lib.FindSenderName(sender_name.as_ptr()) };
+        
+        if found {
+            info!("find_sender_name: Found sender '{}'", sender_name_str);
+        } else {
+            debug!("find_sender_name: Sender '{}' not found", sender_name_str);
+        }
 
         Ok(found)
     }
@@ -1273,6 +1387,8 @@ impl RustySpout {
         &mut self,
         sender_name: T,
     ) -> Result<(bool, u32, u32, HANDLE, DWORD)> {
+        let sender_name_str = sender_name.as_ref();
+        debug!("get_sender_info: Getting info for sender '{}'", sender_name_str);
         let lib = unsafe { library!(self.library) };
 
         let sender_name = str_to_cstring!("get_sender_info", sender_name);
@@ -1294,16 +1410,29 @@ impl RustySpout {
             )
         };
 
+        let width_val = width.0;
+        let height_val = height.0;
+        let format_val = format.0;
+
+        if success {
+            info!("get_sender_info: Successfully retrieved info for '{}': {}x{}, format={}, handle={:?}", 
+                sender_name_str, width_val, height_val, format_val, share_handle);
+        } else {
+            warn!("get_sender_info: Failed to retrieve info for '{}' (returned {}x{}, format={})", 
+                sender_name_str, width_val, height_val, format_val);
+        }
+
         Ok((
             success,
-            width.0,
-            height.0,
+            width_val,
+            height_val,
             share_handle as *mut std::os::raw::c_void,
-            format.0,
+            format_val,
         ))
     }
 
     pub fn get_active_sender<T: AsRef<str>>(&mut self) -> Result<(bool, String)> {
+        debug!("get_active_sender: Querying active sender");
         let lib = unsafe { library!(self.library) };
 
         let mut buffer = vec![];
@@ -1313,6 +1442,12 @@ impl RustySpout {
         let success = unsafe { lib.GetActiveSender(sender_name.as_ptr().cast_mut()) };
 
         let sender_name = cstring_to_string!("get_active_sender", sender_name);
+        
+        if success {
+            info!("get_active_sender: Active sender = '{}'", sender_name);
+        } else {
+            debug!("get_active_sender: No active sender found (returned name: '{}')", sender_name);
+        }
 
         Ok((success, sender_name))
     }
