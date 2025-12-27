@@ -57,6 +57,14 @@ fn ensure_spout_initted() {
 }
 
 fn build_spout() -> (PathBuf, PathBuf) {
+    // Get the Rust build profile to match CMake build type
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    let (build_type, profile_name) = if profile == "release" {
+        ("Release", "Release")
+    } else {
+        ("Debug", "Debug")
+    };
+    
     let dst = cmake::Config::new(SPOUT_DIR)
         .define("SKIP_INSTALL_ALL", "OFF")
         .define("SKIP_INSTALL_HEADERS", "OFF")
@@ -66,6 +74,11 @@ fn build_spout() -> (PathBuf, PathBuf) {
         .define("SPOUT_BUILD_LIBRARY", "ON")
         .define("SPOUT_BUILD_SPOUTDX", "OFF")
         .define("SPOUT_BUILD_SPOUTDX_EXAMPLES", "OFF")
+        // Set CMake build type to match Rust profile
+        // For single-config generators (like Makefiles), use CMAKE_BUILD_TYPE
+        .define("CMAKE_BUILD_TYPE", build_type)
+        // For multi-config generators (Visual Studio), use profile() method
+        .profile(profile_name)
         .build();
 
     (dst.clone(), dst.join("lib"))
